@@ -1,0 +1,220 @@
+---
+title: "Weight liting modelling"
+author: "Marcin Kruczyk"
+date: "Saturday, October 24, 2015"
+output: html_document
+---
+
+##Introduction
+The aim of this report is to build a machine learning model for prediction if a person performs excercise of weight lifting in the correct way or makes one of five identified errors. For the project the data from accelerometers on the belt, arm, forearm and dumbell of 6 paricipans will be used.
+
+##Loading data
+The data has been delivered in the form of .csv files. *pml-training.csv* is the file containing data for training and *pml-testing.csv* contains data for testing. In the testing file there are no lables, so it can not be used to estimate quality of the model. Therefore *validation set* will be created in order to estimate parameters of the model.
+
+```{r warning=FALSE, message=FALSE}
+library(caret)
+training <- read.csv("./pml-training.csv")
+testing <- read.csv("./pml-testing.csv")
+set.seed(348)
+inTrain <- createDataPartition(training$classe, p=0.7, list=FALSE)
+validation <- training[-inTrain,]
+training <- training[inTrain,]
+```
+
+##Exploration Analysis
+First let's take a look at the training data.
+```{r warning=FALSE, message=FALSE}
+dim(training)
+nnas <- apply(training, 2, function(x) sum(is.na(x)))
+nnas[nnas > 0]
+```
+
+There are a lot of variables with very high number of NA's. I decided to remove from the data every variable with number of NA's higher than 5000.
+
+```{r warning=FALSE, message=FALSE}
+nas <- NULL
+for(i in 1:ncol(training)){
+        nas <- c(nas, sum(is.na(training[,i])))
+}
+nas_index <- nas < 5000 
+training <- training[,nas_index]
+testing <- testing[,nas_index[-length(nas_index)]]
+validation <- validation[,nas_index[-length(nas_index)]]
+summary(training)
+```
+
+There are also a lot of variables which have empty cells and *DIV/0!* string. I decided to replace those values with NA's and repeat the procedure of discarding variables with high number of NA's.
+```{r warning=FALSE, message=FALSE}
+for(i in 1:ncol(training)){
+        training[training[,i] == "#DIV/0!" | training[,i] == "", i] <- NA
+}
+
+nas <- NULL
+for(i in 1:ncol(training)){
+        nas <- c(nas, sum(is.na(training[,i])))
+}
+nas_index <- nas < 5000 
+training <- training[,nas_index]
+testing <- testing[,nas_index[-length(nas_index)]]
+validation <- validation[,nas_index[-length(nas_index)]]
+dim(training)
+colnames(training)
+```
+
+Now let's take a look at the timestamp variables. They should not carry any information about the decision, so probably those variables, index variable named *X* and *new_window* variable should be discarded. Just in case let's take a look at the timestamp variables versus decision variable.
+
+```{r warning=FALSE, message=FALSE}
+library(ggplot2)
+library(grid)
+library(gridExtra)
+p1 <- ggplot(data=training, aes(raw_timestamp_part_1, classe)) + stat_sum(aes(size=..n..))
+p2 <- ggplot(data=training, aes(raw_timestamp_part_2, classe)) + stat_sum(aes(size=..n..))
+p3 <- ggplot(data=training, aes(cvtd_timestamp, classe)) + stat_sum(aes(size=..n..))
+grid.arrange(p1, p2, p3, ncol=1)
+```
+
+There is no clear pattern in the timestamp variables so we can discard them.
+
+```{r warning=FALSE, message=FALSE}
+training <- training[, -c(1, 3, 4, 5, 6)]
+testing <- testing[, -c(1, 3, 4, 5, 6)]
+validation <- validation[, -c(1, 3, 4, 5, 6)]
+dim(training)
+colnames(training)
+```
+
+There are factor variables in the data so it makes sense to create dummy variables. Let's do it.
+```{r warning=FALSE, message=FALSE}
+decision <- training$classe
+decision_val <- validation$classe
+
+training <- model.matrix(classe~., data=training)[,-1]
+testing <- model.matrix(~., data=testing)[,-1]
+validation <- model.matrix(~., data=validation[,-ncol(validation)])[,-1]
+dim(training)
+```
+
+Now we will remove the variables which have zero or near zero variance. They would not have large impact on the quality of the model.
+
+```{r warning=FALSE, message=FALSE}
+nzv <- nearZeroVar(training, saveMetrics= TRUE)
+sum(nzv$nzv)
+```
+
+There are no variables with low variance in the dataset, so there is nothing to discard.
+Now we will filter variables which are highly correlated. We will discard variables which have correlation > 0.75. Of course one variable from each group of the correlated variables will be kept.
+
+```{r warning=FALSE, message=FALSE}
+descrCor <- cor(training)
+summary(descrCor[upper.tri(descrCor)])
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
+training <- training[,-highlyCorDescr]
+testing <- testing[,-highlyCorDescr]
+validation <- validation[,-highlyCorDescr]
+descrCor2 <- cor(training)
+summary(descrCor2[upper.tri(descrCor2)])
+dim(training)
+```
+
+Now let's find linear combinations in the data and let's discard the redundant variables.
+
+```{r warning=FALSE, message=FALSE}
+findLinearCombos(training)
+dim(training)
+```
+
+There are no variables in linear combinations so we do not need to remove anything.
+Now we will apply recursive feature selection (RFE) algorithm to select variables that are necessary for solving our classification problem. The method is computationally complex so we will try finding a set of variables from 1 to 25. If it appears to be to few, we will try with more variables.
+```{r warning=FALSE, message=FALSE}
+training <-  as.data.frame(training)
+training$classe <- decision
+validation <- as.data.frame(validation)
+validation$classe <- decision_val
+colnames(training)
+dim(training)
+```
+```{r cache=TRUE, warning=FALSE, message=FALSE, results='hide'}
+set.seed(415)
+ctrl <- rfeControl(functions=rfFuncs, method="cv", number=5, verbose=TRUE)
+
+rfeMod <- rfe(training[,-36],training[,36], metric = "Accuracy", 
+              size=c(1:25), rfeControl = ctrl)
+```
+```{r warning=FALSE, message=FALSE}
+rfeMod
+plot(rfeMod, type=c("g","o"))
+```
+
+According to the algorithm the optimal number of variables to be used for the model are 4, but one can see, that there is no large difference between including 2 and 4 variables. However we will trust the algorithm and will include the 4 variables for further processing.
+
+```{r warning=FALSE, message=FALSE}
+indexes <- c(which(colnames(training) %in% rfeMod$optVariables), 36)
+training <- training[, indexes]
+testing <- testing[, indexes]
+validation <- validation[, indexes]
+colnames(training)
+```
+The important variables are: *num_window*, *yaw_belt*, *magnet_belt_y* and *roll_dumbbell*. Let's plot the 4 selected variables against each other and the decision.
+```{r warning=FALSE, message=FALSE, fig.width=10, fig.height=10}
+p1 <- ggplot(data=training, aes(x=num_window, y=yaw_belt, color=classe))
+p1 <- p1 + geom_point(alpha=0.3)
+p2 <- ggplot(data=training, aes(x=num_window, y=magnet_belt_y, color=classe))
+p2 <- p2 + geom_point(alpha=0.3)
+p3 <- ggplot(data=training, aes(x=num_window, y=roll_dumbbell, color=classe))
+p3 <- p3 + geom_point(alpha=0.3)
+p4 <- ggplot(data=training, aes(x=yaw_belt, y=magnet_belt_y, color=classe))
+p4 <- p4 + geom_point(alpha=0.3)
+p5 <- ggplot(data=training, aes(x=yaw_belt, y=roll_dumbbell, color=classe))
+p5 <- p5 + geom_point(alpha=0.3)
+p6 <- ggplot(data=training, aes(x=magnet_belt_y, y=roll_dumbbell, color=classe))
+p6 <- p6 + geom_point(alpha=0.3)
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol=2)
+```
+
+There is no clear pattern in the plots.
+
+##Building Model
+The problem is classification problem. I decided to use Random Forest algorithm to build the model. This time the full interpretability of the model is not necessary and Random Forest is very effective algorithm. I use repeated corss-validation to avoid overfitting. I will also try to choose the optimal value of *mtry* parameter. Usually the optimal value is $\sqrt{number of features}$ but just in case let's optimize the parameter.
+
+```{r cache=TRUE, warning=FALSE, message=FALSE}
+ctrl <- trainControl(method = "repeatedcv",
+                     number=5,
+                     repeats = 5,
+                     classProbs = TRUE,
+                     summaryFunction = multiClassSummary
+)
+
+
+forestGrid <- expand.grid(mtry = c(1:4))
+
+
+set.seed(123)
+modFit <- train(classe ~ .,
+                data = training,
+                method = "rf",
+                tuneGrid = forestGrid,
+                trControl = ctrl,
+                ntree=100
+)
+modFit
+plot(modFit)
+```
+
+Suprisingly, the model has the best Accuracy and other quality measures like logLoss and Kappa for mtry=3. The Accuracy over 99% is an excellent result. Now we need to see if the model is not overfitted.
+
+##Model Validation
+I will use the final model produced by *caret* to predict the classes from the validation dataset.
+```{r warning=FALSE, message=FALSE}
+library(randomForest)
+val_pred <- predict(modFit$finalModel, newdata=validation)
+confusionMatrix(val_pred, decision_val)
+```
+The Accuracy of the model on the validation dataset is also over 99% which means the model is not overfitted and has a very high quality.
+
+##Prediction
+Finally, I use the model to predict values from the imported dataset.
+```{r warning=FALSE, message=FALSE}
+predict(modFit$finalModel, newdata=testing)
+```
+
+
